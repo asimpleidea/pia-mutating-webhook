@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -39,6 +44,9 @@ func main() {
 	// -----------------------------------
 	// Flags and inits
 	// -----------------------------------
+	ctx, canc := context.WithCancel(context.Background())
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGABRT)
 	opts := &Options{}
 
 	flag.DurationVar(&opts.MaxLatency, "max-latency", defaultMaxLatency,
@@ -108,4 +116,70 @@ func main() {
 			Str("order-direction", opts.OrderDirection).
 			Msg("invalid order-direction flag provided")
 	}
+
+	// -----------------------------------
+	// Get the list
+	// -----------------------------------
+
+	var regions []*Region
+	{
+		servListCtx, servListCanc := context.WithTimeout(ctx, time.Minute)
+		resp := getServersList(servListCtx, log, opts.ServersListURL)
+		select {
+		case <-stop:
+			servListCanc()
+			fmt.Println()
+			log.Info().Msg("shutting down...")
+			<-resp
+			return
+		case resp := <-resp:
+			if resp.Err != nil {
+				log.Fatal().Err(resp.Err).Msg("could not get list of servers")
+			}
+
+			regions = resp.Response.Regions
+		}
+	}
+
+	// TODO: use regions
+	_ = regions
+
+	canc()
+}
+
+type ServersListResult struct {
+	Err      error
+	Response *ServersListResponse
+}
+
+func getServersList(ctx context.Context, log zerolog.Logger, serversListURL string) <-chan ServersListResult {
+	result := make(chan ServersListResult)
+	log.Info().Msg("getting list of servers...")
+
+	go func() {
+		client := http.Client{}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, serversListURL, nil)
+		if err != nil {
+			result <- ServersListResult{Err: err, Response: nil}
+			return
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			result <- ServersListResult{Err: err, Response: nil}
+			return
+		}
+		defer resp.Body.Close()
+		log.Info().Msg("done")
+
+		var listResp ServersListResponse
+		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+			result <- ServersListResult{Err: err, Response: nil}
+			return
+		}
+
+		result <- ServersListResult{Err: nil, Response: &listResp}
+	}()
+
+	return result
 }

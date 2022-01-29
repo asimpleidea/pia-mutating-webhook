@@ -3,15 +3,15 @@ package main
 // TODO: groups
 
 type Region struct {
-	ID          string    `json:"id" yaml:"id"`
-	Name        string    `json:"name" yaml:"name"`
-	Country     string    `json:"country" yaml:"country"`
-	AutoRegion  bool      `json:"auto_region" yaml:"autoRegion"`
-	DNS         string    `json:"dns" yaml:"dns"`
-	PortForward bool      `json:"port_forward" yaml:"portForward"`
-	Geo         bool      `json:"geo" yaml:"geo"`
-	Offline     bool      `json:"offline" yaml:"offline"`
-	Servers     []*Server `json:"servers" yaml:"servers"`
+	ID          string       `json:"id" yaml:"id"`
+	Name        string       `json:"name" yaml:"name"`
+	Country     string       `json:"country" yaml:"country"`
+	AutoRegion  bool         `json:"auto_region" yaml:"autoRegion"`
+	DNS         string       `json:"dns" yaml:"dns"`
+	PortForward bool         `json:"port_forward" yaml:"portForward"`
+	Geo         bool         `json:"geo" yaml:"geo"`
+	Offline     bool         `json:"offline" yaml:"offline"`
+	Servers     *ServersList `json:"servers" yaml:"servers"`
 }
 
 type ServersList struct {
@@ -25,5 +25,10 @@ type ServersList struct {
 type Server struct {
 	IP  string `json:"ip" yaml:"ip"`
 	CN  string `json:"cn" yaml:"cn"`
-	VAN string `json:"van" yaml:"van,omitempty"`
+	VAN bool   `json:"van" yaml:"van,omitempty"`
+}
+
+type ServersListResponse struct {
+	// Groups
+	Regions []*Region `json:"regions" yaml:"regions"`
 }
