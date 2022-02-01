@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -141,9 +143,84 @@ func main() {
 		}
 	}
 
-	// TODO: use regions
-	_ = regions
+	// -----------------------------------
+	// Start workers
+	// -----------------------------------
 
+	wg := sync.WaitGroup{}
+	regionsChan := make(chan *Region, 256)
+	latencies := make(chan *Region, 256)
+
+	for i := 0; i < int(opts.Workers); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for reg := range regionsChan {
+				if reg.Servers == nil {
+					latencies <- nil
+					continue
+				}
+
+				if len(reg.Servers.WireGuard) == 0 {
+					latencies <- nil
+					continue
+				}
+
+				ips := []*Server{}
+				for _, serv := range reg.Servers.WireGuard {
+					l := log.With().Str("cn", serv.CN).Str("ip", serv.IP).
+						Logger()
+
+					lat, err := calculateLatency(ctx, serv.IP, opts.MaxLatency)
+					if err != nil {
+						if err, ok := err.(net.Error); ok && err.Timeout() {
+							l.Debug().Msg("ignoring, as latency is too high")
+
+						} else {
+							l.Err(err).Msg("error while connecting to server, skipping...")
+						}
+
+						latencies <- nil
+						continue
+					}
+
+					l.Debug().Str("latency", lat.String()).Msg("connected and retrieved latency")
+					ips = append(ips, &Server{IP: serv.IP, CN: serv.CN, VAN: serv.VAN, Latency: lat})
+				}
+
+				reg := reg.Clone()
+				reg.Servers.WireGuard = ips
+				latencies <- reg
+			}
+		}()
+	}
+
+	// -----------------------------------
+	// Pass regions to workers
+	// -----------------------------------
+
+	log.Info().Msg("calculating latencies...")
+	for _, region := range regions {
+		regionsChan <- region
+
+	}
+
+	responses := 0
+	results := []*Region{}
+	for lat := range latencies {
+		if lat != nil && len(lat.Servers.WireGuard) > 0 {
+			results = append(results, lat)
+		}
+
+		responses++
+		if responses == len(regions) {
+			break
+		}
+		_ = lat
+	}
+
+	_ = results
 	canc()
 }
 
@@ -182,4 +259,37 @@ func getServersList(ctx context.Context, log zerolog.Logger, serversListURL stri
 	}()
 
 	return result
+}
+
+func calculateLatency(ctx context.Context, ip string, maxLatency time.Duration) (*time.Duration, error) {
+	// client := &http.Client{}
+	now := time.Now()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:443", ip), maxLatency)
+	if err != nil {
+		return nil, err
+	}
+
+	elapsed := time.Since(now)
+	conn.Close()
+	// req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s:443", ip), nil)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// req.Close = true
+
+	// latCtx, latCanc := context.WithTimeout(ctx, maxLatency)
+	// req = req.WithContext(latCtx)
+	// defer latCanc()
+
+	// resp, err := client.Do(req)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// fmt.Println("here")
+
+	// if resp.StatusCode != http.StatusOK {
+	// 	return nil, fmt.Errorf("status is not ok but %d", resp.StatusCode)
+	// }
+
+	return &elapsed, nil
 }
