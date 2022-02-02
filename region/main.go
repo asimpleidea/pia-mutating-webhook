@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -72,6 +74,28 @@ func main() {
 
 	log := zerolog.New(os.Stderr).With().Timestamp().Logger()
 	log.Info().Msg("starting...")
+
+	// -----------------------------------
+	// Get Kubernetes clientset
+	// -----------------------------------
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Err(err).Msg("could not get Kubernetes clientset")
+		return
+	}
+
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	namespace := os.Getenv("NAMESPACE")
+	if namespace == "" {
+		log.Error().Msg("could not get namespace")
+		return
+	}
 
 	// -----------------------------------
 	// Validations
@@ -185,11 +209,7 @@ func main() {
 			confWriterTimer = time.NewTimer(time.Minute)
 
 		case <-confWriterTimer.C:
-			for _, lat := range latResults {
-				// TODO
-				_ = lat
-			}
-
+			_ = clientset
 		case lat := <-latenciesChan:
 			if lat != nil && len(lat.Servers.WireGuard) > 0 {
 				latResults = append(latResults, lat)
