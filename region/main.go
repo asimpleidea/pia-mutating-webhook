@@ -19,17 +19,19 @@ import (
 )
 
 const (
-	defaultWorkersNumber  uint          = 5
-	defaultMaxServers     uint          = 25
-	defaultServersListURL string        = "https://serverlist.piaservers.net/vpninfo/servers/v6"
-	orderByName           string        = "name"
-	orderByLatency        string        = "latency"
-	defaultOrderBy        string        = orderByName
-	ascendingOrder        string        = "asc"
-	descendingOrder       string        = "desc"
-	defaultOrderDirection string        = ascendingOrder
-	defaultVerbosity      int           = 1
-	defaultMaxLatency     time.Duration = 50 * time.Millisecond
+	defaultWorkersNumber     uint          = 5
+	defaultMaxServers        uint          = 25
+	defaultServersListURL    string        = "https://serverlist.piaservers.net/vpninfo/servers/v6"
+	orderByName              string        = "name"
+	orderByLatency           string        = "latency"
+	defaultOrderBy           string        = orderByName
+	ascendingOrder           string        = "asc"
+	descendingOrder          string        = "desc"
+	defaultOrderDirection    string        = ascendingOrder
+	defaultVerbosity         int           = 1
+	defaultMaxLatency        time.Duration = 50 * time.Millisecond
+	defaultFrequency         time.Duration = time.Hour
+	defaultResultsWriterFreq time.Duration = 5 * time.Minute
 )
 
 type Options struct {
@@ -40,16 +42,15 @@ type Options struct {
 	OrderBy        string
 	OrderDirection string
 	Verbosity      int
+	Frequency      time.Duration
 }
 
 func main() {
-	// -----------------------------------
-	// Flags and inits
-	// -----------------------------------
-	ctx, canc := context.WithCancel(context.Background())
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGABRT)
 	opts := &Options{}
+
+	// -----------------------------------
+	// Flags
+	// -----------------------------------
 
 	flag.DurationVar(&opts.MaxLatency, "max-latency", defaultMaxLatency,
 		"Maximum latency tolerated for a server to be kept.")
@@ -65,6 +66,8 @@ func main() {
 		fmt.Sprintf("The order direction. Accepted values: %s or %s", ascendingOrder, descendingOrder))
 	flag.IntVar(&opts.Verbosity, "verbosity", defaultVerbosity,
 		"The log verbosity level, from 0 (verbose) to 3 (silent).")
+	flag.DurationVar(&opts.Frequency, "frequency", defaultFrequency,
+		"The frequency of updating the list of servers.")
 	flag.Parse()
 
 	log := zerolog.New(os.Stderr).With().Timestamp().Logger()
@@ -120,176 +123,156 @@ func main() {
 	}
 
 	// -----------------------------------
-	// Get the list
-	// -----------------------------------
-
-	var regions []*Region
-	{
-		servListCtx, servListCanc := context.WithTimeout(ctx, time.Minute)
-		resp := getServersList(servListCtx, log, opts.ServersListURL)
-		select {
-		case <-stop:
-			servListCanc()
-			fmt.Println()
-			log.Info().Msg("shutting down...")
-			<-resp
-			return
-		case resp := <-resp:
-			if resp.Err != nil {
-				log.Fatal().Err(resp.Err).Msg("could not get list of servers")
-			}
-
-			regions = resp.Response.Regions
-		}
-	}
-
-	// -----------------------------------
 	// Start workers
 	// -----------------------------------
 
-	wg := sync.WaitGroup{}
+	ctx, canc := context.WithCancel(context.Background())
 	regionsChan := make(chan *Region, 256)
-	latencies := make(chan *Region, 256)
-
+	latenciesChan := make(chan *Region, 256)
+	wg := sync.WaitGroup{}
 	for i := 0; i < int(opts.Workers); i++ {
 		wg.Add(1)
-		go func() {
+		go func(wid int) {
 			defer wg.Done()
+			log.Info().Int("worker", wid+1).Msg("worker starting...")
+			work(ctx, regionsChan, latenciesChan, log, opts.MaxLatency)
+			log.Info().Int("worker", wid+1).Msg("worker exited")
+		}(i)
+	}
 
-			for reg := range regionsChan {
-				if reg.Servers == nil {
-					latencies <- nil
-					continue
+	// -----------------------------------
+	// Handle events
+	// -----------------------------------
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGABRT)
+
+	updateTicker := time.NewTicker(opts.Frequency)
+	confWriterTimer := time.NewTimer(time.Second)
+
+	// This will be used to trigger the first iteration
+	firstTime := time.NewTimer(5 * time.Second)
+
+	latResults := []*Region{}
+	stopping := false
+	for !stopping {
+		select {
+		case <-updateTicker.C:
+		case <-firstTime.C:
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				servListCtx, servListCanc := context.WithTimeout(ctx, time.Minute)
+				defer servListCanc()
+
+				log.Debug().Msg("getting list of servers...")
+				regions, err := getServersList(servListCtx, opts.ServersListURL)
+				if err != nil {
+					// TODO: auto-exit if failed too many times in a row?
+					log.Err(err).Msg("could not load regions, skipping...")
+					return
 				}
 
-				if len(reg.Servers.WireGuard) == 0 {
-					latencies <- nil
-					continue
+				log.Info().Msg("calculating latencies...")
+
+				for _, region := range regions {
+					regionsChan <- region
 				}
+			}()
 
-				ips := []*Server{}
-				for _, serv := range reg.Servers.WireGuard {
-					l := log.With().Str("cn", serv.CN).Str("ip", serv.IP).
-						Logger()
+			// After some minutes, this will activate and will write results
+			confWriterTimer = time.NewTimer(time.Minute)
 
-					lat, err := calculateLatency(ctx, serv.IP, opts.MaxLatency)
-					if err != nil {
-						if err, ok := err.(net.Error); ok && err.Timeout() {
-							l.Debug().Msg("ignoring, as latency is too high")
-
-						} else {
-							l.Err(err).Msg("error while connecting to server, skipping...")
-						}
-
-						latencies <- nil
-						continue
-					}
-
-					l.Debug().Str("latency", lat.String()).Msg("connected and retrieved latency")
-					ips = append(ips, &Server{IP: serv.IP, CN: serv.CN, VAN: serv.VAN, Latency: lat})
-				}
-
-				reg := reg.Clone()
-				reg.Servers.WireGuard = ips
-				latencies <- reg
+		case <-confWriterTimer.C:
+			for _, lat := range latResults {
+				// TODO
+				_ = lat
 			}
-		}()
-	}
 
-	// -----------------------------------
-	// Pass regions to workers
-	// -----------------------------------
-
-	log.Info().Msg("calculating latencies...")
-	for _, region := range regions {
-		regionsChan <- region
-
-	}
-
-	responses := 0
-	results := []*Region{}
-	for lat := range latencies {
-		if lat != nil && len(lat.Servers.WireGuard) > 0 {
-			results = append(results, lat)
+		case lat := <-latenciesChan:
+			if lat != nil && len(lat.Servers.WireGuard) > 0 {
+				latResults = append(latResults, lat)
+			}
+		case <-stop:
+			stopping = true
+			updateTicker.Stop()
+			confWriterTimer.Stop()
+			fmt.Println()
 		}
-
-		responses++
-		if responses == len(regions) {
-			break
-		}
-		_ = lat
 	}
 
-	_ = results
+	close(latenciesChan)
+	close(regionsChan)
 	canc()
+	log.Info().Msg("shutting down...")
+	log.Info().Msg("waiting for all goroutines to exit...")
+
+	wg.Wait()
+	log.Info().Msg("goodbye!")
 }
 
-type ServersListResult struct {
-	Err      error
-	Response *ServersListResponse
-}
-
-func getServersList(ctx context.Context, log zerolog.Logger, serversListURL string) <-chan ServersListResult {
-	result := make(chan ServersListResult)
-	log.Info().Msg("getting list of servers...")
-
-	go func() {
-		client := http.Client{}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, serversListURL, nil)
-		if err != nil {
-			result <- ServersListResult{Err: err, Response: nil}
-			return
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			result <- ServersListResult{Err: err, Response: nil}
-			return
-		}
-		defer resp.Body.Close()
-		log.Info().Msg("done")
-
-		var listResp ServersListResponse
-		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
-			result <- ServersListResult{Err: err, Response: nil}
-			return
-		}
-
-		result <- ServersListResult{Err: nil, Response: &listResp}
-	}()
-
-	return result
-}
-
-func calculateLatency(ctx context.Context, ip string, maxLatency time.Duration) (*time.Duration, error) {
-	// client := &http.Client{}
-	now := time.Now()
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:443", ip), maxLatency)
+func getServersList(ctx context.Context, serversListURL string) ([]*Region, error) {
+	client := http.Client{}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serversListURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	elapsed := time.Since(now)
-	conn.Close()
-	// req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s:443", ip), nil)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// req.Close = true
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-	// latCtx, latCanc := context.WithTimeout(ctx, maxLatency)
-	// req = req.WithContext(latCtx)
-	// defer latCanc()
+	var listResp ServersListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, err
+	}
 
-	// resp, err := client.Do(req)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// fmt.Println("here")
+	return listResp.Regions, nil
+}
 
-	// if resp.StatusCode != http.StatusOK {
-	// 	return nil, fmt.Errorf("status is not ok but %d", resp.StatusCode)
-	// }
+func work(ctx context.Context, regionsChan, latenciesResult chan *Region, log zerolog.Logger, maxLatency time.Duration) {
+	for reg := range regionsChan {
+		if reg.Servers == nil {
+			continue
+		}
 
-	return &elapsed, nil
+		if len(reg.Servers.WireGuard) == 0 {
+			// TODO: we're only concentrating on WireGuard for now. So we skip
+			// this if it doesn't have any.
+			continue
+		}
+
+		ips := []*Server{}
+		for _, serv := range reg.Servers.WireGuard {
+			ip := fmt.Sprintf("%s:443", serv.IP)
+			l := log.With().Str("cn", serv.CN).Str("ip", serv.IP).
+				Logger()
+
+			now := time.Now()
+
+			conn, err := net.DialTimeout("tcp", ip, maxLatency)
+			if err != nil {
+				if err, ok := err.(net.Error); ok && err.Timeout() {
+					l.Debug().Msg("ignoring, as latency is too high")
+
+				} else {
+					l.Err(err).Msg("error while connecting to server, skipping...")
+				}
+				continue
+			}
+
+			elapsed := time.Since(now)
+			conn.Close()
+
+			l.Debug().Str("latency", elapsed.String()).Msg("connected and retrieved latency")
+			ips = append(ips, &Server{IP: serv.IP, CN: serv.CN, VAN: serv.VAN, Latency: &elapsed})
+		}
+
+		reg := reg.Clone()
+		reg.Servers.WireGuard = ips
+		latenciesResult <- reg
+	}
 }
