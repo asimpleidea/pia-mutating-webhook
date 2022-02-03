@@ -16,6 +16,10 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
+	kerr "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -34,6 +38,7 @@ const (
 	defaultMaxLatency        time.Duration = 50 * time.Millisecond
 	defaultFrequency         time.Duration = time.Hour
 	defaultResultsWriterFreq time.Duration = 5 * time.Minute
+	defaultConfMapName       string        = "pia-regions"
 )
 
 type Options struct {
@@ -209,7 +214,17 @@ func main() {
 			confWriterTimer = time.NewTimer(time.Minute)
 
 		case <-confWriterTimer.C:
-			_ = clientset
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				wrtCtx, wrtCanc := context.WithTimeout(ctx, time.Minute)
+				defer wrtCanc()
+
+				if err := updateConfigMap(wrtCtx, clientset, namespace, latResults); err != nil {
+					// TODO: keep track of the number of times this failed.
+					log.Err(err).Msg("could not update configmap")
+				}
+			}()
 		case lat := <-latenciesChan:
 			if lat != nil && len(lat.Servers.WireGuard) > 0 {
 				latResults = append(latResults, lat)
@@ -295,4 +310,42 @@ func work(ctx context.Context, regionsChan, latenciesResult chan *Region, log ze
 		reg.Servers.WireGuard = ips
 		latenciesResult <- reg
 	}
+}
+
+func updateConfigMap(ctx context.Context, clientset *kubernetes.Clientset, namespace string, regions []*Region) error {
+	cfg := clientset.CoreV1().ConfigMaps(namespace)
+	exists := true
+	confMap, err := cfg.Get(ctx, defaultConfMapName, metav1.GetOptions{})
+
+	if err != nil {
+		if !kerr.IsNotFound(err) {
+			confMap = &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        defaultConfMapName,
+					Namespace:   namespace,
+					Annotations: map[string]string{},
+				},
+				BinaryData: map[string][]byte{},
+			}
+			exists = false
+		}
+
+		return err
+	}
+
+	data, err := yaml.Marshal(regions)
+	if err != nil {
+		return err
+	}
+
+	confMap.BinaryData["regions"] = data
+	confMap.Annotations["last-update"] = time.Now().String()
+
+	if exists {
+		_, err = cfg.Update(ctx, confMap, metav1.UpdateOptions{})
+	} else {
+		_, err = cfg.Create(ctx, confMap, metav1.CreateOptions{})
+	}
+
+	return err
 }
