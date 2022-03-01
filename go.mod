@@ -3,7 +3,7 @@ module github.com/asimpleidea/pia-mutating-webhook
 go 1.17
 
 replace (
-    github.com/asimpleidea/pia-mutating-webhook/region => ./region
+    github.com/asimpleidea/pia-mutating-webhook/regions-updater => ./regions-updater
 )
 
 require (

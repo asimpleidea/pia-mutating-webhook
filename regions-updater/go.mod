@@ -1,13 +1,13 @@
-module github.com/asimpleidea/pia-mutating-webhook/region
+module github.com/asimpleidea/pia-mutating-webhook/regions-updater
 
 go 1.17
 
 require (
 	github.com/rs/zerolog v1.26.1
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
-	k8s.io/api v0.23.3
-	k8s.io/apimachinery v0.23.3
-	k8s.io/client-go v0.23.3
+	k8s.io/api v0.23.4
+	k8s.io/apimachinery v0.23.4
+	k8s.io/client-go v0.23.4
 )
 
 require (
