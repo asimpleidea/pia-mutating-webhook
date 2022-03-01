@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: regions-updater
+  namespace: pia-webhook-system
+  labels:
+    project: pia-sidecar-injector
+    app: regions-updater
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      project: pia-sidecar-injector
+      app: regions-updater
+  template:
+    metadata:
+      labels:
+        project: pia-sidecar-injector
+        app: regions-updater
+    spec:
+      serviceAccountName: regions-updater-service-account
+      containers:
+      - name: regions-updater
+        # TODO: use versions, to master nor latest
+        image: asimpleidea/regions-updater:with-configmap
+        imagePullPolicy: Always
+        args:
+        - "--verbosity=0"
+        env:
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
