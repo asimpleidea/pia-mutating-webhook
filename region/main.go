@@ -39,6 +39,7 @@ const (
 	defaultFrequency         time.Duration = time.Hour
 	defaultResultsWriterFreq time.Duration = 5 * time.Minute
 	defaultConfMapName       string        = "pia-regions"
+	namespaceEnv             string        = "NAMESPACE"
 )
 
 type Options struct {
@@ -81,30 +82,24 @@ func main() {
 	log.Info().Msg("starting...")
 
 	// -----------------------------------
-	// Get Kubernetes clientset
+	// Get Kubernetes clientset and data
 	// -----------------------------------
 
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Err(err).Msg("could not get Kubernetes clientset")
-		return
-	}
-
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	namespace := os.Getenv("NAMESPACE")
+	namespace := os.Getenv(namespaceEnv)
 	if namespace == "" {
-		log.Error().Msg("could not get namespace")
+		log.Fatal().Msg("could not get namespace from enviroment variables")
 		return
+	}
+
+	clientset, err := getKubernetesClientset()
+	if err != nil {
+		log.Fatal().Err(err).Msg("could not get Kubernetes clientset")
 	}
 
 	// -----------------------------------
 	// Validations
 	// -----------------------------------
+
 	{
 		logLevels := []zerolog.Level{
 			zerolog.DebugLevel,
@@ -126,7 +121,7 @@ func main() {
 	if opts.Workers == 0 {
 		log.Debug().Uint("workers", opts.Workers).
 			Uint("default-workers-number", defaultWorkersNumber).
-			Msg("invalid workers flag provided: resetting...")
+			Msg("invalid workers flag provided: using default value...")
 	}
 
 	if opts.MaxServers == 0 {
@@ -141,14 +136,14 @@ func main() {
 	if !strings.EqualFold(opts.OrderBy, orderByName) &&
 		!strings.EqualFold(opts.OrderBy, orderByLatency) {
 		log.Fatal().Err(fmt.Errorf("unknown order type")).
-			Str("order-by", opts.OrderBy).Msg("invalid order-by flag provided")
+			Str("order-by", opts.OrderBy).Msg("")
 	}
 
 	if !strings.EqualFold(opts.OrderDirection, ascendingOrder) &&
 		!strings.EqualFold(opts.OrderDirection, descendingOrder) {
 		log.Fatal().Err(fmt.Errorf("unknown order direction")).
 			Str("order-direction", opts.OrderDirection).
-			Msg("invalid order-direction flag provided")
+			Msg("")
 	}
 
 	// -----------------------------------
@@ -156,15 +151,21 @@ func main() {
 	// -----------------------------------
 
 	ctx, canc := context.WithCancel(context.Background())
-	regionsChan := make(chan *Region, 256)
-	latenciesChan := make(chan *Region, 256)
+
+	// The request chan, containing the region to test.
+	reqChan := make(chan *Region, 256)
+
+	// The result chan, containing the region with the Latency field set.
+	resChan := make(chan *Region, 256)
+
 	wg := sync.WaitGroup{}
 	for i := 0; i < int(opts.Workers); i++ {
 		wg.Add(1)
 		go func(wid int) {
 			defer wg.Done()
+
 			log.Info().Int("worker", wid+1).Msg("worker starting...")
-			work(ctx, regionsChan, latenciesChan, log, opts.MaxLatency)
+			work(ctx, reqChan, resChan, log, opts.MaxLatency)
 			log.Info().Int("worker", wid+1).Msg("worker exited")
 		}(i)
 	}
@@ -198,7 +199,7 @@ func main() {
 				log.Debug().Msg("getting list of servers...")
 				regions, err := getServersList(servListCtx, opts.ServersListURL)
 				if err != nil {
-					// TODO: auto-exit if failed too many times in a row?
+					// TODO: auto-exit if failed too many times in a row
 					log.Err(err).Msg("could not load regions, skipping...")
 					return
 				}
@@ -206,12 +207,14 @@ func main() {
 				log.Info().Msg("calculating latencies...")
 
 				for _, region := range regions {
-					regionsChan <- region
+					reqChan <- region
 				}
 			}()
 
 			// After some minutes, this will activate and will write results
-			confWriterTimer = time.NewTimer(time.Minute)
+			// TODO: if user sets a long timeout, this may not be enough and
+			// may leave out some results.
+			confWriterTimer = time.NewTimer(defaultResultsWriterFreq)
 
 		case <-confWriterTimer.C:
 			wg.Add(1)
@@ -221,11 +224,12 @@ func main() {
 				defer wrtCanc()
 
 				if err := updateConfigMap(wrtCtx, clientset, namespace, latResults); err != nil {
-					// TODO: keep track of the number of times this failed.
-					log.Err(err).Msg("could not update configmap")
+					// TODO: keep track of the number of times this failed, and
+					// close if it failed too many times.
+					log.Err(err).Msg("could not update configmap, skipping...")
 				}
 			}()
-		case lat := <-latenciesChan:
+		case lat := <-resChan:
 			if lat != nil && len(lat.Servers.WireGuard) > 0 {
 				latResults = append(latResults, lat)
 			}
@@ -237,14 +241,23 @@ func main() {
 		}
 	}
 
-	close(latenciesChan)
-	close(regionsChan)
+	close(resChan)
+	close(reqChan)
 	canc()
 	log.Info().Msg("shutting down...")
 	log.Info().Msg("waiting for all goroutines to exit...")
 
 	wg.Wait()
 	log.Info().Msg("goodbye!")
+}
+
+func getKubernetesClientset() (*kubernetes.Clientset, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("could not get configuration from cluster: %w", err)
+	}
+
+	return kubernetes.NewForConfig(config)
 }
 
 func getServersList(ctx context.Context, serversListURL string) ([]*Region, error) {
@@ -268,8 +281,8 @@ func getServersList(ctx context.Context, serversListURL string) ([]*Region, erro
 	return listResp.Regions, nil
 }
 
-func work(ctx context.Context, regionsChan, latenciesResult chan *Region, log zerolog.Logger, maxLatency time.Duration) {
-	for reg := range regionsChan {
+func work(ctx context.Context, reqChan, latenciesResult chan *Region, log zerolog.Logger, maxLatency time.Duration) {
+	for reg := range reqChan {
 		if reg.Servers == nil {
 			continue
 		}
@@ -319,18 +332,18 @@ func updateConfigMap(ctx context.Context, clientset *kubernetes.Clientset, names
 
 	if err != nil {
 		if !kerr.IsNotFound(err) {
-			confMap = &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        defaultConfMapName,
-					Namespace:   namespace,
-					Annotations: map[string]string{},
-				},
-				BinaryData: map[string][]byte{},
-			}
-			exists = false
+			return err
 		}
 
-		return err
+		exists = false
+		confMap = &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        defaultConfMapName,
+				Namespace:   namespace,
+				Annotations: map[string]string{},
+			},
+			BinaryData: map[string][]byte{},
+		}
 	}
 
 	data, err := yaml.Marshal(regions)
