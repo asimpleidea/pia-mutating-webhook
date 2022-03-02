@@ -152,11 +152,12 @@ func main() {
 
 	ctx, canc := context.WithCancel(context.Background())
 
-	// The request chan, containing the region to test.
-	reqChan := make(chan *Region, 256)
+	// The request chan, containing the server to test.
+	reqChan := make(chan *ServerLatency, 256)
 
-	// The result chan, containing the region with the Latency field set.
-	resChan := make(chan *Region, 256)
+	// The result chan, containing the same structure set to reqChan but with
+	// the Latency field set.
+	resChan := make(chan *ServerLatency, 256)
 
 	wg := sync.WaitGroup{}
 	for i := 0; i < int(opts.Workers); i++ {
@@ -183,7 +184,7 @@ func main() {
 	// This will be used to trigger the first iteration
 	firstTime := time.NewTimer(5 * time.Second)
 
-	latResults := []*Region{}
+	latResults := []*ServerLatency{}
 	stopping := false
 	for !stopping {
 		select {
@@ -207,7 +208,18 @@ func main() {
 				log.Info().Msg("calculating latencies...")
 
 				for _, region := range regions {
-					reqChan <- region
+					if region.Servers == nil {
+						continue
+					}
+
+					// TODO: we're only concentrating on WireGuard for now. So we skip
+					// this if it doesn't have any.
+					for _, serv := range region.Servers.WireGuard {
+						reqChan <- &ServerLatency{
+							Server: serv,
+							Region: region,
+						}
+					}
 				}
 			}()
 
@@ -281,51 +293,40 @@ func getServersList(ctx context.Context, serversListURL string) ([]*Region, erro
 	return listResp.Regions, nil
 }
 
-func work(ctx context.Context, reqChan, latenciesResult chan *Region, log zerolog.Logger, maxLatency time.Duration) {
+func work(ctx context.Context, reqChan, resChan chan *ServerLatency, log zerolog.Logger, maxLatency time.Duration) {
 	for reg := range reqChan {
-		if reg.Servers == nil {
-			continue
-		}
+		ip := fmt.Sprintf("%s:443", reg.IP)
+		l := log.With().Str("cn", reg.CN).Str("ip", reg.IP).
+			Logger()
 
-		if len(reg.Servers.WireGuard) == 0 {
-			// TODO: we're only concentrating on WireGuard for now. So we skip
-			// this if it doesn't have any.
-			continue
-		}
+		now := time.Now()
 
-		ips := []*Server{}
-		for _, serv := range reg.Servers.WireGuard {
-			ip := fmt.Sprintf("%s:443", serv.IP)
-			l := log.With().Str("cn", serv.CN).Str("ip", serv.IP).
-				Logger()
-
-			now := time.Now()
-
-			conn, err := net.DialTimeout("tcp", ip, maxLatency)
-			if err != nil {
-				if err, ok := err.(net.Error); ok && err.Timeout() {
-					l.Debug().Msg("ignoring, as latency is too high")
-
-				} else {
-					l.Err(err).Msg("error while connecting to server, skipping...")
-				}
-				continue
+		conn, err := net.DialTimeout("tcp", ip, maxLatency)
+		if err != nil {
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				l.Debug().Msg("ignoring, as latency is too high")
+			} else {
+				l.Err(err).Msg("error while connecting to server, skipping...")
 			}
 
-			elapsed := time.Since(now)
-			conn.Close()
-
-			l.Debug().Str("latency", elapsed.String()).Msg("connected and retrieved latency")
-			ips = append(ips, &Server{IP: serv.IP, CN: serv.CN, VAN: serv.VAN, Latency: &elapsed})
+			continue
 		}
 
-		reg := reg.Clone()
-		reg.Servers.WireGuard = ips
-		latenciesResult <- reg
+		elapsed := time.Since(now)
+		conn.Close()
+
+		l.Debug().Str("latency", elapsed.String()).Msg("connected and retrieved latency")
+
+		// We use Clone() so that we don't copy pointers.
+		resChan <- &ServerLatency{
+			Latency: &elapsed,
+			Region:  reg.Region.Clone(),
+			Server:  reg.Server.Clone(),
+		}
 	}
 }
 
-func updateConfigMap(ctx context.Context, clientset *kubernetes.Clientset, namespace string, regions []*Region) error {
+func updateConfigMap(ctx context.Context, clientset *kubernetes.Clientset, namespace string, latencies []*ServerLatency) error {
 	cfg := clientset.CoreV1().ConfigMaps(namespace)
 	exists := true
 	confMap, err := cfg.Get(ctx, defaultConfMapName, metav1.GetOptions{})
@@ -346,7 +347,7 @@ func updateConfigMap(ctx context.Context, clientset *kubernetes.Clientset, names
 		}
 	}
 
-	data, err := yaml.Marshal(regions)
+	data, err := yaml.Marshal(latencies)
 	if err != nil {
 		return err
 	}

@@ -47,10 +47,9 @@ type ServersList struct {
 }
 
 type Server struct {
-	Latency *time.Duration `json:"latency" yaml:"latency"`
-	IP      string         `json:"ip" yaml:"ip"`
-	CN      string         `json:"cn" yaml:"cn"`
-	VAN     bool           `json:"van" yaml:"van,omitempty"`
+	IP  string `json:"ip" yaml:"ip"`
+	CN  string `json:"cn" yaml:"cn"`
+	VAN bool   `json:"van" yaml:"van,omitempty"`
 }
 
 func (s *Server) Clone() *Server {
@@ -58,18 +57,16 @@ func (s *Server) Clone() *Server {
 		IP:  s.IP,
 		CN:  s.CN,
 		VAN: s.VAN,
-		Latency: func() *time.Duration {
-			if s.Latency == nil {
-				return nil
-			}
-
-			l := *s.Latency
-			return &l
-		}(),
 	}
 }
 
 type ServersListResponse struct {
 	// Groups
 	Regions []*Region `json:"regions" yaml:"regions"`
+}
+
+type ServerLatency struct {
+	Latency *time.Duration `json:"latency" yaml:"latency"`
+	*Server
+	*Region
 }
