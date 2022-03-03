@@ -39,3 +39,27 @@ func (ll byGreaterLatency) Less(i, j int) bool {
 func (ll byGreaterLatency) Swap(i, j int) {
 	ll[i], ll[j] = ll[j], ll[i]
 }
+
+type byLowerRegionName []*ServerLatency
+
+func (rn byLowerRegionName) Len() int {
+	return len(rn)
+}
+
+func (rn byLowerRegionName) Less(i, j int) bool {
+	iserv, jserv := rn[i], rn[j]
+
+	if iserv.Region.Name < jserv.Region.Name {
+		return true
+	}
+
+	if iserv.Region.Name == jserv.Region.Name {
+		return *iserv.Latency > *jserv.Latency
+	}
+
+	return false
+}
+
+func (rn byLowerRegionName) Swap(i, j int) {
+	rn[i], rn[j] = rn[j], rn[i]
+}
