@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,9 +29,9 @@ const (
 	defaultWorkersNumber     uint          = 5
 	defaultMaxServers        uint          = 25
 	defaultServersListURL    string        = "https://serverlist.piaservers.net/vpninfo/servers/v6"
-	orderByName              string        = "name"
+	orderByRegionName        string        = "region-name"
 	orderByLatency           string        = "latency"
-	defaultOrderBy           string        = orderByName
+	defaultOrderBy           string        = orderByLatency
 	ascendingOrder           string        = "asc"
 	descendingOrder          string        = "desc"
 	defaultOrderDirection    string        = ascendingOrder
@@ -69,7 +70,7 @@ func main() {
 	flag.StringVar(&opts.ServersListURL, "servers-list-url", defaultServersListURL,
 		"The URL where to get the list of servers.")
 	flag.StringVar(&opts.OrderBy, "order-by", defaultOrderBy,
-		fmt.Sprintf("How to order the the servers list. Accepted values: %s or %s.", orderByName, orderByLatency))
+		fmt.Sprintf("How to order the the servers list. Accepted values: %s or %s.", orderByRegionName, orderByLatency))
 	flag.StringVar(&opts.OrderDirection, "order-direction", defaultOrderDirection,
 		fmt.Sprintf("The order direction. Accepted values: %s or %s", ascendingOrder, descendingOrder))
 	flag.IntVar(&opts.Verbosity, "verbosity", defaultVerbosity,
@@ -133,7 +134,7 @@ func main() {
 			Msg("invalid servers list url provided")
 	}
 
-	if !strings.EqualFold(opts.OrderBy, orderByName) &&
+	if !strings.EqualFold(opts.OrderBy, orderByRegionName) &&
 		!strings.EqualFold(opts.OrderBy, orderByLatency) {
 		log.Fatal().Err(fmt.Errorf("unknown order type")).
 			Str("order-by", opts.OrderBy).Msg("")
@@ -226,14 +227,34 @@ func main() {
 			// After some minutes, this will activate and will write results
 			// TODO: if user sets a long timeout, this may not be enough and
 			// may leave out some results.
-			confWriterTimer = time.NewTimer(defaultResultsWriterFreq)
+			confWriterTimer = time.NewTimer(time.Minute)
 
 		case <-confWriterTimer.C:
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+
 				wrtCtx, wrtCanc := context.WithTimeout(ctx, time.Minute)
 				defer wrtCanc()
+
+				// Sort the results.
+				var sortIface sort.Interface
+				switch opts.OrderBy {
+				case orderByLatency:
+					if opts.OrderDirection == ascendingOrder {
+						sortIface = byLowerLatency(latResults)
+					} else {
+						sortIface = byGreaterLatency(latResults)
+					}
+				case orderByRegionName:
+					if opts.OrderDirection == ascendingOrder {
+						sortIface = byLowerRegionName(latResults)
+					} else {
+						sortIface = byGreaterRegionName(latResults)
+					}
+				}
+
+				sort.Sort(sortIface)
 
 				if err := updateConfigMap(wrtCtx, clientset, namespace, latResults); err != nil {
 					// TODO: keep track of the number of times this failed, and
