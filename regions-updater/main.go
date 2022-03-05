@@ -237,6 +237,10 @@ func main() {
 				wrtCtx, wrtCanc := context.WithTimeout(ctx, time.Minute)
 				defer wrtCanc()
 
+				if opts.MaxServers > 0 && len(latResults) > int(opts.MaxServers) {
+					latResults = latResults[:opts.MaxServers]
+				}
+
 				// Sort the results.
 				var sortIface sort.Interface
 				switch opts.OrderBy {
