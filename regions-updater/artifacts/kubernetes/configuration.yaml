@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: regions-updater-options
+  namespace: pia-webhook-system
+data:
+  MAX_LATENCY: 50ms
+  WORKERS: "5"
+  MAX_SERVERS: "25"
+  SERVERS_LIST_URL: "https://serverlist.piaservers.net/vpninfo/servers/v6"
+  ORDER_BY: latency
+  ORDER_DIRECTION: asc
+  VERBOSITY: "1"
+  FREQUENCY: 1h
