@@ -27,7 +27,7 @@ import (
 
 const (
 	defaultWorkersNumber     uint          = 5
-	defaultMaxServers        uint          = 25
+	defaultMaxServers        uint          = 100
 	defaultServersListURL    string        = "https://serverlist.piaservers.net/vpninfo/servers/v6"
 	orderByRegionName        string        = "region-name"
 	orderByLatency           string        = "latency"
@@ -65,7 +65,7 @@ func main() {
 		"Maximum latency tolerated for a server to be kept.")
 	flag.UintVar(&opts.Workers, "workers", defaultWorkersNumber,
 		"Number of concurrent workers to use for checking latency.")
-	flag.UintVar(&opts.MaxServers, "max-regions", defaultMaxServers,
+	flag.UintVar(&opts.MaxServers, "max-servers", defaultMaxServers,
 		"Maximum number of servers to keep.")
 	flag.StringVar(&opts.ServersListURL, "servers-list-url", defaultServersListURL,
 		"The URL where to get the list of servers.")
